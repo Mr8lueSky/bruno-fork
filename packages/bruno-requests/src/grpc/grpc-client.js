@@ -1,5 +1,5 @@
 import { makeGenericClientConstructor, ChannelCredentials, Metadata, status, credentials, CallCredentials } from '@grpc/grpc-js';
-import { GrpcReflection } from 'grpc-js-reflection-client';
+import { Client as GrpcReflectionClient } from 'grpc-reflection-js';
 import * as protoLoader from '@grpc/proto-loader';
 import { generateGrpcSampleMessage } from './grpcMessageGenerator';
 import * as tls from 'tls';
@@ -214,32 +214,57 @@ class GrpcClient {
   }
 
   /**
-   * Creates a reflection client that works for v1, v1alpha, or both.
+   * Creates a reflection client using grpc-reflection-js.
    *
    * @param {string} host - host:port of the gRPC server
    * @param {grpc.ChannelCredentials} credentials - defaults to insecure
    * @param {grpc.Metadata} metadata - metadata to be sent with reflection calls (used for insecure connections where credentials can't include metadata)
    * @param {grpc.ChannelOptions} options - channel options
-   * @returns {Promise<{ client: GrpcReflection, services: string[], callOptions: Object }>}
+   * @returns {Promise<{ client: GrpcReflectionClient, services: string[], metadata: grpc.Metadata }>}
    */
   async #getReflectionClient(host, credentials = ChannelCredentials.createInsecure(), metadata = null, options = {}) {
-    const makeClient = (version) => new GrpcReflection(host, credentials, options, version);
-    const callOptions = this.#createCallOptions(metadata);
+    const client = new GrpcReflectionClient(host, credentials, options, metadata);
+    const services = await client.listServices();
+    return { client, services, metadata };
+  }
 
-    let client;
-    let services;
-
-    try {
-      client = makeClient('v1');
-      services = await client.listServices('*', callOptions);
-      return { client, services, callOptions };
-    } catch (e) {
-      console.warn(`gRPC reflection v1 failed:`, e);
+  /**
+   * Extract methods from a protobufjs Root object for a given service.
+   * @param {object} root - protobufjs Root object
+   * @param {string} serviceName - The fully qualified service name
+   * @returns {Array} Array of method definitions
+   */
+  #extractMethodsFromRoot(root, serviceName) {
+    const service = root.lookupService(serviceName);
+    if (!service) {
+      return [];
     }
 
-    client = makeClient('v1alpha');
-    services = await client.listServices('*', callOptions);
-    return { client, services, callOptions };
+    return service.methodsArray.map((method) => {
+      const requestType = root.lookupType(method.requestType);
+      const responseType = root.lookupType(method.responseType);
+
+      return {
+        path: `/${serviceName}/${method.name}`,
+        serviceName: serviceName,
+        name: method.name,
+        requestType: method.requestType,
+        responseType: method.responseType,
+        requestStream: method.requestStream || false,
+        responseStream: method.responseStream || false,
+        root: root,
+        requestSerialize: (value) => {
+          const err = requestType.verify(value);
+          if (err) throw new Error(err);
+          return requestType.encode(requestType.create(value)).finish();
+        },
+        responseDeserialize: (buffer) => {
+          return responseType.decode(buffer);
+        },
+        requestType: requestType,
+        responseType: responseType
+      };
+    });
   }
 
   /**
@@ -656,8 +681,6 @@ class GrpcClient {
   }) {
     const { host, path } = getParsedGrpcUrlObject(request.url);
 
-    // Extract user-agent from headers if provided (case-insensitive)
-    // Set it as grpc.primary_user_agent channel option to prepend to the default user-agent
     const userAgentKey = Object.keys(request.headers).find(
       (key) => key.toLowerCase() === 'user-agent'
     );
@@ -679,23 +702,24 @@ class GrpcClient {
     });
 
     try {
-      const { client, services, callOptions } = await this.#getReflectionClient(host, credentials, metadata, mergedChannelOptions);
+      const { client, services } = await this.#getReflectionClient(host, credentials, metadata, mergedChannelOptions);
 
       const methods = [];
       for (const service of services) {
         if (reflectionServices.includes(service)) {
           continue;
         }
-        const m = await client.listMethods(service, callOptions);
-        methods.push(...m);
+        try {
+          const root = await client.fileContainingSymbol(service);
+          const serviceMethods = this.#extractMethodsFromRoot(root, service);
+          methods.push(...serviceMethods);
+        } catch (serviceError) {
+          console.warn(`Failed to fetch methods for service ${service}:`, serviceError);
+        }
       }
 
       const methodsWithType = methods.map((method) => {
-        const { definition, ...rest } = method;
-        const modifiedMethod = {
-          ...rest,
-          ...definition
-        };
+        const modifiedMethod = { ...method };
         modifiedMethod.type = this.#getMethodType(modifiedMethod);
         return modifiedMethod;
       });
@@ -774,11 +798,11 @@ class GrpcClient {
   }
 
   /**
-   * Generate a sample message for a specific method path
-   * @param {string} methodPath - The full gRPC method path
-   * @param {Object} options - Options for message generation
-   * @returns {Object} A sample message or error
-   */
+ * Generates a sample message based on a method definition
+ * @param {Object} method - gRPC method definition
+ * @param {Object} options - Options for message generation
+ * @returns {Object} A sample message or error
+ */
   generateSampleMessage(methodPath, options = {}) {
     try {
       let method;
@@ -787,7 +811,7 @@ class GrpcClient {
       if (options.methodMetadata) {
         method = options.methodMetadata;
       } else {
-        // Fall back to checking if the method exists in the cache
+      // Fall back to checking if the method exists in the cache
         if (!this.methods.has(methodPath)) {
           return {
             success: false,

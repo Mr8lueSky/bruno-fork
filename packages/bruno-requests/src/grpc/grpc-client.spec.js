@@ -5,24 +5,27 @@
 // Store captured channel options for assertions
 let capturedChannelOptions = null;
 
-// Mock GrpcReflection to capture options
 const mockListServices = jest.fn().mockResolvedValue(['test.Service']);
-const mockListMethods = jest.fn().mockResolvedValue([
-  {
-    path: '/test.Service/TestMethod',
-    definition: {
-      requestStream: false,
-      responseStream: false
-    }
-  }
-]);
+const mockFileContainingSymbol = jest.fn().mockResolvedValue({
+  lookupService: jest.fn().mockReturnValue({
+    methodsArray: [
+      {
+        name: 'TestMethod',
+        requestType: 'TestRequest',
+        responseType: 'TestResponse',
+        requestStream: false,
+        responseStream: false
+      }
+    ]
+  })
+});
 
-jest.mock('grpc-js-reflection-client', () => ({
-  GrpcReflection: jest.fn().mockImplementation((host, credentials, options) => {
+jest.mock('grpc-reflection-js', () => ({
+  Client: jest.fn().mockImplementation((url, credentials, options) => {
     capturedChannelOptions = options;
     return {
       listServices: mockListServices,
-      listMethods: mockListMethods
+      fileContainingSymbol: mockFileContainingSymbol
     };
   })
 }));
@@ -105,6 +108,20 @@ describe('GrpcClient', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     capturedChannelOptions = null;
+    mockListServices.mockResolvedValue(['test.Service']);
+    mockFileContainingSymbol.mockResolvedValue({
+      lookupService: jest.fn().mockReturnValue({
+        methodsArray: [
+          {
+            name: 'TestMethod',
+            requestType: 'TestRequest',
+            responseType: 'TestResponse',
+            requestStream: false,
+            responseStream: false
+          }
+        ]
+      })
+    });
     mockEventCallback = jest.fn();
     grpcClient = new GrpcClient(mockEventCallback);
   });
