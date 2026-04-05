@@ -36,8 +36,7 @@ module.exports = [
       commonjs({
         transformMixedEsModules: true
       }),
-      typescript({ tsconfig: './tsconfig.json' }),
-      terser()
+      typescript({ tsconfig: './tsconfig.json' })
     ],
     external: (id) => isBuiltin(id) || ['axios', 'qs', 'ws', 'debug', 'shell-env'].includes(id)
   }
