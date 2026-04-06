@@ -20,6 +20,10 @@ const generateSampleMessageFromFields = (fields, options = {}, root = null) => {
     }
 
     const isRepeated = field.repeated === true || field.repeated === 'repeated' || field.rule === 'repeated' || field.map;
+
+    // Debug logging - remove in production
+    console.log('Field:', field.name, 'repeated:', field.repeated, 'rule:', field.rule, 'map:', field.map, 'isRepeated:', isRepeated);
+
     const fieldType = getFieldType(field.type, field);
 
     // Generate a value based on field name and type
